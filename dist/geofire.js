@@ -10,13 +10,9 @@
  * License: MIT
  */
 
-// Include RSVP if this is being run in node
-if (typeof module !== "undefined" && typeof process !== "undefined") {
-  var RSVP = require("rsvp");
-}
-
 var GeoFire = (function() {
   "use strict";
+
 /**
  * Creates a GeoCallbackRegistration instance.
  *
@@ -112,17 +108,7 @@ var GeoFire = function(firebaseRef) {
       }
     });
 
-    return new RSVP.Promise(function(resolve, reject) {
-      function onComplete(error) {
-        if (error !== null) {
-          reject("Error: Firebase synchronization failed: " + error);
-        }
-        else {
-          resolve();
-        }
-      }
-      _firebaseRef.update(newData, onComplete);
-    });
+    return _firebaseRef.update(newData);
   };
 
   /**
@@ -135,16 +121,13 @@ var GeoFire = function(firebaseRef) {
    */
   this.get = function(key) {
     validateKey(key);
-    return new RSVP.Promise(function(resolve, reject) {
-      _firebaseRef.child(key).once("value", function(dataSnapshot) {
-        if (dataSnapshot.val() === null) {
-          resolve(null);
-        } else {
-          resolve(decodeGeoFireObject(dataSnapshot.val()));
-        }
-      }, function (error) {
-        reject("Error: Firebase synchronization failed: " + error);
-      });
+    return _firebaseRef.child(key).once("value").then(function(dataSnapshot) {
+      var snapshotVal = dataSnapshot.val();
+      if (snapshotVal === null) {
+        return null;
+      } else {
+        return decodeGeoFireObject(snapshotVal);
+      }
     });
   };
 
@@ -155,22 +138,21 @@ var GeoFire = function(firebaseRef) {
    * If the provided key does not exist in the index, the returned promise is fulfilled with null.
    *
    * @param {string} key The key of the geofire object to retrieve
-   * @return {RSVP.Promise} A promise that is fulfilled with an object of {key, location, data}
+   * @return {Promise.<Array.<number>>} A promise that is fulfilled with an object of {key, location, data}
    */
   this.getWithData = function(key) {
-    validateKey(key);
-    return new RSVP.Promise(function(resolve, reject) {
-      _firebaseRef.child(key).once("value", function(dataSnapshot) {
-        var dsv = dataSnapshot.val();
-        if(dsv === null) {
-          resolve(null);
-        } else {
-          resolve({key: key, location: decodeGeoFireObject(dsv), data: decodeGeoFireDataObject(dsv)});
-        }
-      }, function (error) {
-        reject("Error: Firebase synchronization failed: " + error);
-      });
-    });
+    validateKey(key);    
+    return _firebaseRef.child(key).once("value").then(function(dataSnapshot) {
+      var dsv = dataSnapshot.val();
+      if(dsv === null) {
+        return null;
+      } else {
+        return { 
+          key: key, 
+          location: decodeGeoFireObject(dsv), 
+          data: decodeGeoFireDataObject(dsv)};          
+      }
+    });    
   };
 
   /**
@@ -701,6 +683,24 @@ function decodeGeoFireObject(geoFireObj) {
 }
 
 /**
+ * Returns the key of a Firebase snapshot across SDK versions.
+ *
+ * @param {DataSnapshot} snapshot A Firebase snapshot.
+ * @return {string|null} key The Firebase snapshot's key.
+ */
+ function getKey(snapshot) {
+   var key;
+   if (typeof snapshot.key === "function") {
+     key = snapshot.key();
+   } else if (typeof snapshot.key === "string" || snapshot.key === null) {
+     key = snapshot.key;
+   } else {
+     key = snapshot.name();
+   }
+   return key;
+ }
+
+/**
  * Creates a GeoQuery instance.
  *
  * @constructor
@@ -906,8 +906,8 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
    * @param {Firebase DataSnapshot} locationDataSnapshot A snapshot of the data stored for this location.
    */
   function _childAddedCallback(locationDataSnapshot) {
-    var val = locationDataSnapshot.val();
-    _updateLocation(locationDataSnapshot.key(), decodeGeoFireObject(val), decodeGeoFireDataObject(val));
+    var val = locationDataSnapshot.val();    
+    _updateLocation(getKey(locationDataSnapshot), decodeGeoFireObject(locationDataSnapshot.val()), decodeGeoFireDataObject(val));
   }
 
   /**
@@ -916,8 +916,8 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
    * @param {Firebase DataSnapshot} locationDataSnapshot A snapshot of the data stored for this location.
    */
   function _childChangedCallback(locationDataSnapshot) {
-    var val = locationDataSnapshot.val();
-    _updateLocation(locationDataSnapshot.key(), decodeGeoFireObject(val), decodeGeoFireDataObject(val));
+    var val = locationDataSnapshot.val();    
+    _updateLocation(getKey(locationDataSnapshot), decodeGeoFireObject(val), decodeGeoFireDataObject(val));
   }
 
   /**
@@ -926,7 +926,7 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
    * @param {Firebase DataSnapshot} locationDataSnapshot A snapshot of the data stored for this location.
    */
   function _childRemovedCallback(locationDataSnapshot) {
-    var key = locationDataSnapshot.key();
+    var key = getKey(locationDataSnapshot);
     if (_locationsTracked.hasOwnProperty(key)) {
       _firebaseRef.child(key).once("value", function(snapshot) {
         var location = snapshot.val() === null ? null : decodeGeoFireObject(snapshot.val());
@@ -1078,6 +1078,12 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
     for (var i = 0; i < numKeys; ++i) {
       var key = keys[i];
 
+      // If the query was cancelled while going through this loop, stop updating locations and stop
+      // firing events
+      if (_cancelled === true) {
+        break;
+      }
+
       // Get the cached information for this location
       var locationDict = _locationsTracked[key];
 
@@ -1181,6 +1187,9 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
    * query via on() will be cancelled. This query can no longer be used in the future.
    */
   this.cancel = function () {
+    // Mark this query as cancelled
+    _cancelled = true;
+
     // Cancel all callbacks in this query's callback list
     _callbacks = {
       ready: [],
@@ -1223,6 +1232,9 @@ var GeoQuery = function (firebaseRef, queryCriteria) {
     key_exited: [],
     key_moved: []
   };
+
+  // Variable to track when the query is cancelled
+  var _cancelled = false;
 
   // Variables used to keep track of when to fire the "ready" event
   var _valueEventFired = false;
